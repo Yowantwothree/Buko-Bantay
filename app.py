@@ -1,44 +1,43 @@
-"""Prototype: coconut leaf disease detector with cited recommendations.
+"""Prototype: coconut leaf disease detector with cited recommendations (TFLite version).
 
 Run:   python app.py
-Needs: coconut_leaf_model.keras and class_names.txt (both written by the training
-       script) in the same folder as this file.
+Needs: coconut_leaf_model.tflite and class_names.txt in the same folder as this file.
 """
+import os
 from pathlib import Path
 
 import gradio as gr
 import numpy as np
-import os
-import tensorflow as tf
+from ai_edge_litert.interpreter import Interpreter
+from PIL import Image
 
 from recommendations import DISCLAIMER, format_recommendation
 
 APP_DIR = Path(__file__).resolve().parent
-MODEL_PATH = APP_DIR / "coconut_leaf_model.keras"
+MODEL_PATH = APP_DIR / "coconut_leaf_model.tflite"
 CLASS_NAMES_PATH = APP_DIR / "class_names.txt"
 
 IMG_SIZE = (256, 256)     # must match training
 MIN_CONFIDENCE = 0.80     # below this the app asks for a better photo
 
-model = tf.keras.models.load_model(MODEL_PATH)
 CLASS_NAMES = CLASS_NAMES_PATH.read_text().splitlines()
 
-
-from ai_edge_litert.interpreter import Interpreter
-from PIL import Image
-
-interpreter = Interpreter(model_path=str(APP_DIR / "coconut_leaf_model.tflite"))
+interpreter = Interpreter(model_path=str(MODEL_PATH))
 interpreter.allocate_tensors()
-inp = interpreter.get_input_details()[0]["index"]
-out = interpreter.get_output_details()[0]["index"]
+INPUT_INDEX = interpreter.get_input_details()[0]["index"]
+OUTPUT_INDEX = interpreter.get_output_details()[0]["index"]
+
 
 def predict(image):
     if image is None:
         return None, "Upload or take a photo of a coconut leaf first."
+
+    # Pixel scaling happens inside the model, so the input stays in the raw 0-255 range.
     arr = np.asarray(image.convert("RGB").resize(IMG_SIZE, Image.BILINEAR), dtype=np.float32)
-    interpreter.set_tensor(inp, arr[np.newaxis])
+    interpreter.set_tensor(INPUT_INDEX, arr[np.newaxis])
     interpreter.invoke()
-    probs = interpreter.get_tensor(out)[0]
+    probs = interpreter.get_tensor(OUTPUT_INDEX)[0]
+
     scores = {name: float(p) for name, p in zip(CLASS_NAMES, probs)}
     top = int(np.argmax(probs))
     return scores, format_recommendation(CLASS_NAMES[top], float(probs[top]), MIN_CONFIDENCE)
