@@ -1,4 +1,6 @@
-tensorflow
-gradio
-pillow
-numpy
+gradio==6.31.0
+gradio_client==2.7.2
+hf-gradio==0.4.1
+numpy==2.5.3
+pillow==12.3.0
+ai-edge-litert==2.3.0

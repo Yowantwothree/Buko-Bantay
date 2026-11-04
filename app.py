@@ -8,6 +8,7 @@ from pathlib import Path
 
 import gradio as gr
 import numpy as np
+import os
 import tensorflow as tf
 
 from recommendations import DISCLAIMER, format_recommendation
@@ -23,19 +24,24 @@ model = tf.keras.models.load_model(MODEL_PATH)
 CLASS_NAMES = CLASS_NAMES_PATH.read_text().splitlines()
 
 
+from ai_edge_litert.interpreter import Interpreter
+from PIL import Image
+
+interpreter = Interpreter(model_path=str(APP_DIR / "coconut_leaf_model.tflite"))
+interpreter.allocate_tensors()
+inp = interpreter.get_input_details()[0]["index"]
+out = interpreter.get_output_details()[0]["index"]
+
 def predict(image):
     if image is None:
         return None, "Upload or take a photo of a coconut leaf first."
-
-    # Same resize as training. Pixel scaling is done inside the model,
-    # so the input stays in the raw 0-255 range.
-    resized = tf.image.resize(np.asarray(image.convert("RGB")), IMG_SIZE).numpy()
-    probs = model.predict(resized[np.newaxis].astype("float32"), verbose=0)[0]
-
+    arr = np.asarray(image.convert("RGB").resize(IMG_SIZE, Image.BILINEAR), dtype=np.float32)
+    interpreter.set_tensor(inp, arr[np.newaxis])
+    interpreter.invoke()
+    probs = interpreter.get_tensor(out)[0]
     scores = {name: float(p) for name, p in zip(CLASS_NAMES, probs)}
     top = int(np.argmax(probs))
-    advice = format_recommendation(CLASS_NAMES[top], float(probs[top]), MIN_CONFIDENCE)
-    return scores, advice
+    return scores, format_recommendation(CLASS_NAMES[top], float(probs[top]), MIN_CONFIDENCE)
 
 
 ABOUT = (
@@ -59,5 +65,4 @@ with gr.Blocks(title="Coconut Leaf Disease Detector") as demo:
     button.click(predict, inputs=image, outputs=[label, advice])
 
 if __name__ == "__main__":
-    # 0.0.0.0 lets a phone on the same Wi-Fi open the app at http://<computer-ip>:7860
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
