@@ -1,5 +1,6 @@
 """Buko Bantay - coconut leaf health checker (TFLite). Run: python app.py
 Needs coconut_leaf_model.tflite and class_names.txt next to this file."""
+import html
 import os
 from pathlib import Path
 
@@ -8,11 +9,15 @@ import numpy as np
 from ai_edge_litert.interpreter import Interpreter
 from PIL import Image
 
+import auth
 from i18n import LANGS, NAMES, T, THRESHOLDS, header_html, home_html, result_html, settings_html
+from strings import X
+
 
 APP_DIR = Path(__file__).resolve().parent
 IMG_SIZE = (256, 256)  # must match training
 CLASS_NAMES = (APP_DIR / "class_names.txt").read_text().splitlines()
+
 
 interpreter = Interpreter(model_path=str(APP_DIR / "coconut_leaf_model.tflite"))
 interpreter.allocate_tensors()
@@ -31,20 +36,53 @@ def classify(image):
 def strict_choices(lang):
     return list(zip(T[lang]["strict_opts"], THRESHOLDS))
 
+PAGES = ("auth", "home", "results", "settings")
+N_OUT = len(PAGES) + 1
 
 def pages(name):
-    return [gr.update(visible=name == p) for p in ("home", "results", "settings")]
+    return [*[gr.update(visible=name == p) for p in PAGES], gr.update(visible=name != "auth")]
+
+# ----------- account ----------- #
+def auth_html(lang):
+    return f'<div class="hero"><h2>{X[lang]["auth_title"]}</h2><p>{X[lang]["auth_hint"]}</p></div>'
+
+def who_html(lang, user):
+    if not user:
+        return ""
+    return f'<div class="card">{X[lang]["signed_in"]}: <b>{html.escape(user["username"])}</b></div>'
+
+def _enter(user, code, lang):
+    if user is None:
+        gr.Warning(X[lang]["err_" + code])
+        return [None, *[gr.update()] * N_OUT, gr.update(), gr.update()]
+    gr.Info(X[lang]["welcome"].format(user["username"]))
+    return [user, *pages("home"), "", who_html(lang, user)]
+
+def do_login(username, password, lang):
+    user, code = auth.login(username, password)
+    return _enter(user, code, lang)
+
+def do_register(username, password, lang):
+    user, code = auth.register(username, password)
+    return _enter(user, code, lang)
+
+def do_logout():
+    return [None, None, None, *pages("auth"), ""]
 
 
-def analyze(image, lang, thr, previous):
+# ----------- scanning ----------- #
+def analyze(image, lang, thr, previous, user):
+    if user is None:
+        gr.Warning(X[lang]["need_login"])
+        return [previous, gr.update(), gr.update(), *pages("auth")]
     if image is None:
         gr.Warning(T[lang]["no_photo"])
-        return [previous, gr.update(), gr.update(), *[gr.update()] * 3]
+        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT]
     probs = classify(image)
     return [(image, probs), image, result_html(lang, thr, probs, CLASS_NAMES), *pages("results")]
 
 
-def apply_settings(lang, thr, last):
+def apply_settings(lang, thr, last, user):
     t = T[lang]
     results = result_html(lang, thr, last[1], CLASS_NAMES) if last else gr.update()
     return [
@@ -53,8 +91,10 @@ def apply_settings(lang, thr, last):
         results, settings_html(lang),
         gr.update(label=t["language"]),
         gr.update(label=t["strict"], info=t["strict_help"], choices=strict_choices(lang), value=thr),
+        auth_html(lang), gr.update(label=X[lang]["username"]), gr.update(label=X[lang]["password"]),
+        gr.update(value=X[lang]["login"]), gr.update(value=X[lang]["register"]),
+        gr.update(value=X[lang]["logout"]), gr.update(value=lang), who_html(lang, user),
     ]
-
 
 CSS = """
 .gradio-container, .dark, .dark .gradio-container { color-scheme: light;
@@ -109,10 +149,19 @@ STYLE = {"theme": THEME, "css": CSS, "js": FORCE_LIGHT}
 V6 = int(gr.__version__.split(".")[0]) >= 6  # Gradio 6 moved theme/css to launch()
 
 with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
-    last = gr.State(None)  # (image, probabilities) of the latest analysis
+    user_state = gr.State(None)  # {"id", "username"} or None; kept per browser session
+    last = gr.State(None)        # (image, probabilities) of the latest analysis
     header = gr.HTML(header_html("en"), elem_id="header-wrap")
 
-    with gr.Column(visible=True) as home:
+    with gr.Column(visible=True) as auth_page:
+        auth_info = gr.HTML(auth_html("en"))
+        auth_lang = gr.Radio(LANGS, value="en", label="Language / Wika")
+        username_box = gr.Textbox(label=X["en"]["username"], max_lines=1)
+        password_box = gr.Textbox(label=X["en"]["password"], type="password", max_lines=1)
+        login_btn = gr.Button(X["en"]["login"], variant="primary")
+        register_btn = gr.Button(X["en"]["register"])
+
+    with gr.Column(visible=False) as home:
         home_info = gr.HTML(home_html("en"))
         image = gr.Image(type="pil", label=T["en"]["photo"], sources=["upload", "webcam"], height=320)
         analyze_btn = gr.Button(T["en"]["analyze"], variant="primary")
@@ -124,23 +173,36 @@ with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
 
     with gr.Column(visible=False) as settings:
         settings_info = gr.HTML(settings_html("en"))
+        who_box = gr.HTML()
         lang_radio = gr.Radio(LANGS, value="en", label=T["en"]["language"])
         strict_radio = gr.Radio(strict_choices("en"), value=0.80, label=T["en"]["strict"], info=T["en"]["strict_help"])
+        logout_btn = gr.Button(X["en"]["logout"])
 
-    with gr.Row(elem_id="bottom-nav"):
+    with gr.Row(elem_id="bottom-nav", visible=False) as nav_row:
         nav_home = gr.Button(T["en"]["nav_home"])
         nav_settings = gr.Button(T["en"]["nav_settings"])
 
-    page_outputs = [home, results, settings]
-    analyze_btn.click(analyze, [image, lang_radio, strict_radio, last], [last, result_img, result_box, *page_outputs])
+    page_outputs = [auth_page, home, results, settings, nav_row]
+
+    login_inputs = [username_box, password_box, lang_radio]
+    login_outputs = [user_state, *page_outputs, password_box, who_box]
+    login_btn.click(do_login, login_inputs, login_outputs)
+    password_box.submit(do_login, login_inputs, login_outputs)
+    register_btn.click(do_register, login_inputs, login_outputs)
+    logout_btn.click(do_logout, outputs=[user_state, last, image, *page_outputs, who_box])
+
+    analyze_btn.click(analyze, [image, lang_radio, strict_radio, last, user_state], [last, result_img, result_box, *page_outputs])
     again_btn.click(lambda: [*pages("home"), None], outputs=[*page_outputs, image])
     nav_home.click(lambda: pages("home"), outputs=page_outputs)
     nav_settings.click(lambda: pages("settings"), outputs=page_outputs)
 
     ui = [header, home_info, image, analyze_btn, nav_home, nav_settings, again_btn,
-          result_box, settings_info, lang_radio, strict_radio]
+          result_box, settings_info, lang_radio, strict_radio, auth_info, username_box,
+          password_box, login_btn, register_btn, logout_btn, auth_lang, who_box]
+    settings_inputs = [lang_radio, strict_radio, last, user_state]
     for control in (lang_radio, strict_radio):
-        control.input(apply_settings, [lang_radio, strict_radio, last], ui)
+        control.input(apply_settings, settings_inputs, ui)
+    auth_lang.input(lambda v: v, auth_lang, lang_radio).then(apply_settings, settings_inputs, ui)
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)),
