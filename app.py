@@ -9,6 +9,7 @@ from ai_edge_litert.interpreter import Interpreter
 from PIL import Image
 
 from i18n import LANGS, NAMES, T, THRESHOLDS, header_html, home_html, result_html, settings_html
+from dashboard import DASH_CSS, DASH_T, add_record, dashboard_html
 
 APP_DIR = Path(__file__).resolve().parent
 IMG_SIZE = (256, 256)  # must match training
@@ -33,15 +34,17 @@ def strict_choices(lang):
 
 
 def pages(name):
-    return [gr.update(visible=name == p) for p in ("home", "results", "settings")]
+    return [gr.update(visible=name == p) for p in ("home", "results", "settings", "dashboard")]
 
 
-def analyze(image, lang, thr, previous):
+def analyze(image, lang, thr, previous, history):
     if image is None:
         gr.Warning(T[lang]["no_photo"])
-        return [previous, gr.update(), gr.update(), *[gr.update()] * 3]
+        return [previous, gr.update(), gr.update(), *[gr.update()] * 4, history, gr.update()]
     probs = classify(image)
-    return [(image, probs), image, result_html(lang, thr, probs, CLASS_NAMES), *pages("results")]
+    history = add_record(history, probs, CLASS_NAMES, thr)
+    return [(image, probs), image, result_html(lang, thr, probs, CLASS_NAMES),
+            *pages("results"), history, dashboard_html(lang, history)]
 
 
 def apply_settings(lang, thr, last):
@@ -98,7 +101,7 @@ button.primary { background:var(--palm) !important; border:none !important; bord
 #bottom-nav { position:fixed !important; bottom:0; left:0; right:0; z-index:50; background:#fff; border-top:1px solid #eadfc8;
   padding:6px 8px calc(6px + env(safe-area-inset-bottom)) !important; gap:8px !important; max-width:520px; margin:0 auto; }
 #bottom-nav button { flex:1; border-radius:14px !important; background:var(--leaf) !important; color:var(--palm-dark) !important; font-weight:700; }
-"""
+""" + DASH_CSS
 THEME = gr.themes.Soft(primary_hue="green", secondary_hue="amber", neutral_hue="stone",
                        font=[gr.themes.GoogleFont("Nunito"), "ui-sans-serif", "system-ui", "sans-serif"])
 FORCE_LIGHT = """() => {
@@ -110,6 +113,7 @@ V6 = int(gr.__version__.split(".")[0]) >= 6  # Gradio 6 moved theme/css to launc
 
 with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
     last = gr.State(None)  # (image, probabilities) of the latest analysis
+    history = gr.State([])   
     header = gr.HTML(header_html("en"), elem_id="header-wrap")
 
     with gr.Column(visible=True) as home:
@@ -127,20 +131,30 @@ with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
         lang_radio = gr.Radio(LANGS, value="en", label=T["en"]["language"])
         strict_radio = gr.Radio(strict_choices("en"), value=0.80, label=T["en"]["strict"], info=T["en"]["strict_help"])
 
+    with gr.Column(visible=False) as dashboard:
+        dash_box = gr.HTML(dashboard_html("en", []))
+
     with gr.Row(elem_id="bottom-nav"):
+        nav_dashboard = gr.Button(DASH_T["en"]["nav"])
         nav_home = gr.Button(T["en"]["nav_home"])
         nav_settings = gr.Button(T["en"]["nav_settings"])
 
-    page_outputs = [home, results, settings]
-    analyze_btn.click(analyze, [image, lang_radio, strict_radio, last], [last, result_img, result_box, *page_outputs])
-    again_btn.click(lambda: [*pages("home"), None], outputs=[*page_outputs, image])
-    nav_home.click(lambda: pages("home"), outputs=page_outputs)
-    nav_settings.click(lambda: pages("settings"), outputs=page_outputs)
+page_outputs = [home, results, settings, dashboard]
+analyze_btn.click(analyze, [image, lang_radio, strict_radio, last, history],
+                      [last, result_img, result_box, *page_outputs, history, dash_box])
+again_btn.click(lambda: [*pages("home"), None], outputs=[*page_outputs, image])
+nav_home.click(lambda: pages("home"), outputs=page_outputs)
+nav_settings.click(lambda: pages("settings"), outputs=page_outputs)
+nav_dashboard.click(lambda lang, h: [*pages("dashboard"), dashboard_html(lang, h)],
+                        [lang_radio, history], [*page_outputs, dash_box])
 
-    ui = [header, home_info, image, analyze_btn, nav_home, nav_settings, again_btn,
+ui = [header, home_info, image, analyze_btn, nav_home, nav_settings, again_btn,
           result_box, settings_info, lang_radio, strict_radio]
-    for control in (lang_radio, strict_radio):
+for control in (lang_radio, strict_radio):
         control.input(apply_settings, [lang_radio, strict_radio, last], ui)
+
+lang_radio.input(lambda lang, h: [dashboard_html(lang, h), gr.update(value=DASH_T[lang]["nav"])],
+                     [lang_radio, history], [dash_box, nav_dashboard])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)),
