@@ -13,6 +13,7 @@ import auth
 from i18n import LANGS, NAMES, T, THRESHOLDS, header_html, home_html, result_html, settings_html
 from strings import X
 
+from dashboard import DASH_CSS, DASH_T, add_record, dashboard_html
 
 APP_DIR = Path(__file__).resolve().parent
 IMG_SIZE = (256, 256)  # must match training
@@ -79,7 +80,9 @@ def analyze(image, lang, thr, previous, user):
         gr.Warning(T[lang]["no_photo"])
         return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT]
     probs = classify(image)
-    return [(image, probs), image, result_html(lang, thr, probs, CLASS_NAMES), *pages("results")]
+    history = add_record(history, probs, CLASS_NAMES, thr)
+    return [(image, probs), image, result_html(lang, thr, probs, CLASS_NAMES),
+            *pages("results"), history, dashboard_html(lang, history)]
 
 
 def apply_settings(lang, thr, last, user):
@@ -138,7 +141,7 @@ button.primary { background:var(--palm) !important; border:none !important; bord
 #bottom-nav { position:fixed !important; bottom:0; left:0; right:0; z-index:50; background:#fff; border-top:1px solid #eadfc8;
   padding:6px 8px calc(6px + env(safe-area-inset-bottom)) !important; gap:8px !important; max-width:520px; margin:0 auto; }
 #bottom-nav button { flex:1; border-radius:14px !important; background:var(--leaf) !important; color:var(--palm-dark) !important; font-weight:700; }
-"""
+""" + DASH_CSS
 THEME = gr.themes.Soft(primary_hue="green", secondary_hue="amber", neutral_hue="stone",
                        font=[gr.themes.GoogleFont("Nunito"), "ui-sans-serif", "system-ui", "sans-serif"])
 FORCE_LIGHT = """() => {
@@ -203,6 +206,9 @@ with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
     for control in (lang_radio, strict_radio):
         control.input(apply_settings, settings_inputs, ui)
     auth_lang.input(lambda v: v, auth_lang, lang_radio).then(apply_settings, settings_inputs, ui)
+
+lang_radio.input(lambda lang, h: [dashboard_html(lang, h), gr.update(value=DASH_T[lang]["nav"])],
+                     [lang_radio, history], [dash_box, nav_dashboard])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)),
