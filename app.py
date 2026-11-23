@@ -10,10 +10,10 @@ from ai_edge_litert.interpreter import Interpreter
 from PIL import Image
 
 import auth
+from dashboard import DASH_CSS, add_record, dashboard_html
 from i18n import LANGS, NAMES, T, THRESHOLDS, header_html, home_html, result_html, settings_html
+from quality import check_quality
 from strings import X
-
-from dashboard import DASH_CSS, DASH_T, add_record, dashboard_html
 
 APP_DIR = Path(__file__).resolve().parent
 IMG_SIZE = (256, 256)  # must match training
@@ -37,55 +37,73 @@ def classify(image):
 def strict_choices(lang):
     return list(zip(T[lang]["strict_opts"], THRESHOLDS))
 
-PAGES = ("auth", "home", "results", "settings")
-N_OUT = len(PAGES) + 1
+
+# "dashboard" is the Home screen shown after login; "home" is the Scan page.
+PAGES = ("auth", "home", "results", "settings", "dashboard")
+N_OUT = len(PAGES) + 1  # the pages plus the bottom nav bar
+
 
 def pages(name):
     return [*[gr.update(visible=name == p) for p in PAGES], gr.update(visible=name != "auth")]
 
+
 # ----------- account ----------- #
 def auth_html(lang):
-    return f'<div class="hero"><h2>{X[lang]["auth_title"]}</h2><p>{X[lang]["auth_hint"]}</p></div>'
+    return (f'<div class="auth-hero"><div class="logo big">B</div>'
+            f'<h2>{X[lang]["auth_title"]}</h2><p>{X[lang]["auth_hint"]}</p></div>')
+
 
 def who_html(lang, user):
     if not user:
         return ""
     return f'<div class="card">{X[lang]["signed_in"]}: <b>{html.escape(user["username"])}</b></div>'
 
+
 def _enter(user, code, lang):
+    # outputs: [user_state, *page_outputs, password_box, who_box]
     if user is None:
         gr.Warning(X[lang]["err_" + code])
         return [None, *[gr.update()] * N_OUT, gr.update(), gr.update()]
-    gr.Info(X[lang]["welcome"].format(user["username"]))
-    return [user, *pages("home"), "", who_html(lang, user)]
+    gr.Info(X[lang]["welcome"].format(user["name"]))
+    return [user, *pages("dashboard"), "", who_html(lang, user)]  # land on the dashboard
 
-def do_login(username, password, lang):
-    user, code = auth.login(username, password)
+
+def do_login(email, password, lang):
+    user, code = auth.login(email, password)
     return _enter(user, code, lang)
 
-def do_register(username, password, lang):
-    user, code = auth.register(username, password)
+
+def do_register(email, password, lang):
+    user, code = auth.register(email, password)
     return _enter(user, code, lang)
 
-def do_logout():
-    return [None, None, None, *pages("auth"), ""]
+
+def do_logout(lang):
+    # outputs: [user_state, last, image, *page_outputs, who_box, scans_state, dash_box]
+    # The scan list is cleared so the next person to log in starts empty.
+    return [None, None, None, *pages("auth"), "", [], dashboard_html(lang, [])]
 
 
 # ----------- scanning ----------- #
-def analyze(image, lang, thr, previous, user):
+def analyze(image, lang, thr, previous, user, scans):
+    # outputs: [last, result_img, result_box, *page_outputs, scans_state, dash_box]
     if user is None:
         gr.Warning(X[lang]["need_login"])
-        return [previous, gr.update(), gr.update(), *pages("auth")]
+        return [previous, gr.update(), gr.update(), *pages("auth"), gr.update(), gr.update()]
     if image is None:
         gr.Warning(T[lang]["no_photo"])
-        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT]
+        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT, gr.update(), gr.update()]
+    ok, reason = check_quality(image)   # FR-004: unusable photos are not classified
+    if not ok:
+        gr.Warning(X[lang]["q_" + reason])
+        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT, gr.update(), gr.update()]
     probs = classify(image)
-    history = add_record(history, probs, CLASS_NAMES, thr)
+    scans = add_record(scans, probs, CLASS_NAMES, thr)
     return [(image, probs), image, result_html(lang, thr, probs, CLASS_NAMES),
-            *pages("results"), history, dashboard_html(lang, history)]
+            *pages("results"), scans, dashboard_html(lang, scans)]
 
 
-def apply_settings(lang, thr, last, user):
+def apply_settings(lang, thr, last, user, scans):
     t = T[lang]
     results = result_html(lang, thr, last[1], CLASS_NAMES) if last else gr.update()
     return [
@@ -94,10 +112,13 @@ def apply_settings(lang, thr, last, user):
         results, settings_html(lang),
         gr.update(label=t["language"]),
         gr.update(label=t["strict"], info=t["strict_help"], choices=strict_choices(lang), value=thr),
-        auth_html(lang), gr.update(label=X[lang]["username"]), gr.update(label=X[lang]["password"]),
+        auth_html(lang), gr.update(label=X[lang]["username"], placeholder=X[lang]["email_ph"]),
+        gr.update(label=X[lang]["password"]),
         gr.update(value=X[lang]["login"]), gr.update(value=X[lang]["register"]),
         gr.update(value=X[lang]["logout"]), gr.update(value=lang), who_html(lang, user),
+        dashboard_html(lang, scans), gr.update(value=X[lang]["nav_scan"]),
     ]
+
 
 CSS = """
 .gradio-container, .dark, .dark .gradio-container { color-scheme: light;
@@ -114,6 +135,7 @@ CSS = """
 body, .gradio-container { background: var(--cream) !important; }
 .gradio-container { max-width: 520px !important; margin: 0 auto !important; padding: 84px 0 96px !important; }
 footer { display: none !important; }
+#settings-page .html-container { padding: 0 !important; }
 #header-wrap { height:0 !important; min-height:0 !important; padding:0 !important; margin:0 !important;
   border:0 !important; background:none !important; overflow:visible !important; }
 .appbar { position:fixed; top:0; left:0; right:0; z-index:60; display:flex; gap:12px; align-items:center;
@@ -140,7 +162,21 @@ details summary { cursor:pointer; font-weight:700; color:var(--palm-dark); }
 button.primary { background:var(--palm) !important; border:none !important; border-radius:14px !important; font-weight:700 !important; min-height:48px; }
 #bottom-nav { position:fixed !important; bottom:0; left:0; right:0; z-index:50; background:#fff; border-top:1px solid #eadfc8;
   padding:6px 8px calc(6px + env(safe-area-inset-bottom)) !important; gap:8px !important; max-width:520px; margin:0 auto; }
-#bottom-nav button { flex:1; border-radius:14px !important; background:var(--leaf) !important; color:var(--palm-dark) !important; font-weight:700; }
+#bottom-nav { flex-wrap:nowrap !important; }
+#bottom-nav button { flex:1; min-width:0 !important; border-radius:14px !important; background:var(--leaf) !important; color:var(--palm-dark) !important; font-weight:700; }
+/* ---- sign-in screen ---- */
+.auth-form { background:#fff; border:1px solid #eadfc8; border-radius:22px; padding:18px 16px !important;
+  box-shadow:0 4px 16px rgba(47,107,58,.10);
+  --block-title-background-fill:transparent; --block-title-padding:0 0 6px 0;
+  --block-label-background-fill:transparent; }
+.auth-hero { text-align:center; margin:4px 0 8px; }
+.auth-hero h2 { color:var(--palm-dark); margin:6px 0 2px; font-size:26px; }
+.auth-hero p { margin:0; color:#5b4a3a; font-size:14px; }
+.logo.big { width:72px; height:72px; font-size:36px; margin:0 auto; }
+.auth-form button.secondary { background:#fff !important; color:var(--palm-dark) !important;
+  border:2px solid var(--palm) !important; border-radius:14px !important; font-weight:700 !important; min-height:48px; }
+.auth-form input:-webkit-autofill { -webkit-box-shadow:0 0 0 1000px #fff inset !important;
+  -webkit-text-fill-color:#3b2f25 !important; }
 """ + DASH_CSS
 THEME = gr.themes.Soft(primary_hue="green", secondary_hue="amber", neutral_hue="stone",
                        font=[gr.themes.GoogleFont("Nunito"), "ui-sans-serif", "system-ui", "sans-serif"])
@@ -152,19 +188,20 @@ STYLE = {"theme": THEME, "css": CSS, "js": FORCE_LIGHT}
 V6 = int(gr.__version__.split(".")[0]) >= 6  # Gradio 6 moved theme/css to launch()
 
 with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
-    user_state = gr.State(None)  # {"id", "username"} or None; kept per browser session
-    last = gr.State(None)        # (image, probabilities) of the latest analysis
+    user_state = gr.State(None)   # {"id", "username"} or None; kept per browser session
+    last = gr.State(None)         # (image, probabilities) of the latest analysis
+    scans_state = gr.State([])    # scan records for the dashboard (cleared on logout)
     header = gr.HTML(header_html("en"), elem_id="header-wrap")
 
-    with gr.Column(visible=True) as auth_page:
+    with gr.Column(visible=True, elem_classes=["auth-form"]) as auth_page:
         auth_info = gr.HTML(auth_html("en"))
         auth_lang = gr.Radio(LANGS, value="en", label="Language / Wika")
-        username_box = gr.Textbox(label=X["en"]["username"], max_lines=1)
+        username_box = gr.Textbox(label=X["en"]["username"], placeholder=X["en"]["email_ph"], max_lines=1)
         password_box = gr.Textbox(label=X["en"]["password"], type="password", max_lines=1)
         login_btn = gr.Button(X["en"]["login"], variant="primary")
         register_btn = gr.Button(X["en"]["register"])
 
-    with gr.Column(visible=False) as home:
+    with gr.Column(visible=False) as home:   # the Scan page
         home_info = gr.HTML(home_html("en"))
         image = gr.Image(type="pil", label=T["en"]["photo"], sources=["upload", "webcam"], height=320)
         analyze_btn = gr.Button(T["en"]["analyze"], variant="primary")
@@ -174,41 +211,48 @@ with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
         result_box = gr.HTML()
         again_btn = gr.Button(T["en"]["again"], variant="primary")
 
-    with gr.Column(visible=False) as settings:
+    with gr.Column(visible=False, elem_id="settings-page") as settings:
         settings_info = gr.HTML(settings_html("en"))
         who_box = gr.HTML()
         lang_radio = gr.Radio(LANGS, value="en", label=T["en"]["language"])
         strict_radio = gr.Radio(strict_choices("en"), value=0.80, label=T["en"]["strict"], info=T["en"]["strict_help"])
         logout_btn = gr.Button(X["en"]["logout"])
 
+    with gr.Column(visible=False) as dash_page:   # the Home screen after login
+        dash_box = gr.HTML(dashboard_html("en", []))
+
     with gr.Row(elem_id="bottom-nav", visible=False) as nav_row:
-        nav_home = gr.Button(T["en"]["nav_home"])
+        nav_home = gr.Button(T["en"]["nav_home"])      # Home = dashboard
+        nav_scan = gr.Button(X["en"]["nav_scan"])      # Scan = leaf photo page
         nav_settings = gr.Button(T["en"]["nav_settings"])
 
-    page_outputs = [auth_page, home, results, settings, nav_row]
+    # same order as PAGES, then the nav bar
+    page_outputs = [auth_page, home, results, settings, dash_page, nav_row]
 
     login_inputs = [username_box, password_box, lang_radio]
     login_outputs = [user_state, *page_outputs, password_box, who_box]
     login_btn.click(do_login, login_inputs, login_outputs)
     password_box.submit(do_login, login_inputs, login_outputs)
     register_btn.click(do_register, login_inputs, login_outputs)
-    logout_btn.click(do_logout, outputs=[user_state, last, image, *page_outputs, who_box])
+    logout_btn.click(do_logout, lang_radio,
+                     [user_state, last, image, *page_outputs, who_box, scans_state, dash_box])
 
-    analyze_btn.click(analyze, [image, lang_radio, strict_radio, last, user_state], [last, result_img, result_box, *page_outputs])
+    analyze_btn.click(analyze, [image, lang_radio, strict_radio, last, user_state, scans_state],
+                      [last, result_img, result_box, *page_outputs, scans_state, dash_box])
     again_btn.click(lambda: [*pages("home"), None], outputs=[*page_outputs, image])
-    nav_home.click(lambda: pages("home"), outputs=page_outputs)
+    nav_home.click(lambda lang, s: [*pages("dashboard"), dashboard_html(lang, s)],
+                   [lang_radio, scans_state], [*page_outputs, dash_box])
+    nav_scan.click(lambda: pages("home"), outputs=page_outputs)
     nav_settings.click(lambda: pages("settings"), outputs=page_outputs)
 
     ui = [header, home_info, image, analyze_btn, nav_home, nav_settings, again_btn,
           result_box, settings_info, lang_radio, strict_radio, auth_info, username_box,
-          password_box, login_btn, register_btn, logout_btn, auth_lang, who_box]
-    settings_inputs = [lang_radio, strict_radio, last, user_state]
+          password_box, login_btn, register_btn, logout_btn, auth_lang, who_box,
+          dash_box, nav_scan]
+    settings_inputs = [lang_radio, strict_radio, last, user_state, scans_state]
     for control in (lang_radio, strict_radio):
         control.input(apply_settings, settings_inputs, ui)
     auth_lang.input(lambda v: v, auth_lang, lang_radio).then(apply_settings, settings_inputs, ui)
-
-lang_radio.input(lambda lang, h: [dashboard_html(lang, h), gr.update(value=DASH_T[lang]["nav"])],
-                     [lang_radio, history], [dash_box, nav_dashboard])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)),
