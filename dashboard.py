@@ -6,17 +6,32 @@ load the saved list and pass it to dashboard_html().
 
 A record looks like this:
     {"time": "2026-11-18T14:30", "label": "leafrot", "confidence": 0.93, "unclear": False}
-
-Have a native speaker review the Bikol text.
 """
+import base64
 import html
+import io
 from collections import Counter
 from datetime import datetime
+
+from PIL import Image, ImageOps
 
 from i18n import NAMES, class_key
 
 KEYS = ["caterpillar", "grayleafspot", "leafrot", "healthy"]
-MAX_RECORDS = 200   # keep only the latest scans
+MAX_RECORDS = 50    # browser localStorage is only ~5 MB, and each record holds a small thumbnail
+THUMB_PREFIX = "data:image/jpeg;base64,"
+
+
+def make_thumb(image):
+    """Shrink a PIL image to a small JPEG data URI (about 5-10 KB) for localStorage."""
+    try:
+        img = ImageOps.exif_transpose(image).convert("RGB")
+        img.thumbnail((160, 160))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=70)
+        return THUMB_PREFIX + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return ""
 RECENT_SHOWN = 5
 
 DASH_T = {
@@ -60,6 +75,8 @@ DASH_CSS = """
   padding:8px 0; border-bottom:1px solid #f1e8d4; }
 .scan:last-child { border-bottom:0; }
 .scan .chip { margin-bottom:0; font-size:13px; padding:4px 10px; }
+.scan-l { display:flex; align-items:center; gap:10px; }
+.scan img.thumb { width:48px; height:48px; object-fit:cover; border-radius:10px; border:1px solid #eadfc8; }
 .scan .when { font-size:12px; color:#7a6a58; text-align:right; }
 """
 
@@ -73,14 +90,15 @@ SAMPLE_HISTORY = [
 ]
 
 
-def add_record(history, probs, class_names, thr):
-    """Return a new history list with the latest scan added."""
+def add_record(history, probs, class_names, thr, image=None):
+    """Return a new history list with the latest scan added (with a thumbnail if given)."""
     top = max(range(len(probs)), key=lambda i: probs[i])
     record = {
         "time": datetime.now().isoformat(timespec="minutes"),
         "label": class_key(class_names[top]),
         "confidence": float(probs[top]),
         "unclear": float(probs[top]) < thr,
+        "thumb": make_thumb(image) if image is not None else "",
     }
     return [*(history or []), record][-MAX_RECORDS:]
 
@@ -137,7 +155,11 @@ def dashboard_html(lang, history):
         else:
             kind = "ok" if r["label"] == "healthy" else "bad"
             chip = f'<span class="chip {kind}">{html.escape(names.get(r["label"], r["label"]))}</span>'
-        rows += (f'<div class="scan">{chip}<div class="when">{round(r["confidence"] * 100)}%'
+        thumb = r.get("thumb") or ""
+        img = (f'<img class="thumb" alt="" src="{html.escape(thumb)}">'
+               if thumb.startswith(THUMB_PREFIX) else "")
+        rows += (f'<div class="scan"><div class="scan-l">{img}{chip}</div>'
+                 f'<div class="when">{round(r["confidence"] * 100)}%'
                  f'<br>{_when(r.get("time"))}</div></div>')
     out.append(f'<div class="card"><h3>{t["recent"]}</h3>{rows}</div>')
 

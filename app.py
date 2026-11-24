@@ -59,48 +59,68 @@ def who_html(lang, user):
     return f'<div class="card">{X[lang]["signed_in"]}: <b>{html.escape(user["username"])}</b></div>'
 
 
-def _enter(user, code, lang):
-    # outputs: [user_state, *page_outputs, password_box, who_box]
+def _scans_for(history, user):
+    """This user's saved scans from the browser's localStorage (kept per account)."""
+    scans = (history or {}).get(str(user["id"]), [])
+    return scans if isinstance(scans, list) else []
+
+
+def _enter(user, code, lang, history):
+    # outputs: [user_state, *page_outputs, password_box, who_box, token_store, scans_state, dash_box]
     if user is None:
         gr.Warning(X[lang]["err_" + code])
-        return [None, *[gr.update()] * N_OUT, gr.update(), gr.update()]
+        return [None, *[gr.update()] * N_OUT, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()]
     gr.Info(X[lang]["welcome"].format(user["name"]))
-    return [user, *pages("dashboard"), "", who_html(lang, user)]  # land on the dashboard
+    scans = _scans_for(history, user)
+    token = auth.create_session(user["id"])   # saved in the browser so a refresh keeps the login
+    return [user, *pages("dashboard"), "", who_html(lang, user), token, scans, dashboard_html(lang, scans)]
 
 
-def do_login(email, password, lang):
+def do_login(email, password, lang, history):
     user, code = auth.login(email, password)
-    return _enter(user, code, lang)
+    return _enter(user, code, lang, history)
 
 
-def do_register(email, password, lang):
+def do_register(email, password, lang, history):
     user, code = auth.register(email, password)
-    return _enter(user, code, lang)
+    return _enter(user, code, lang, history)
 
 
-def do_logout(lang):
-    # outputs: [user_state, last, image, *page_outputs, who_box, scans_state, dash_box]
-    # The scan list is cleared so the next person to log in starts empty.
-    return [None, None, None, *pages("auth"), "", [], dashboard_html(lang, [])]
+def do_logout(lang, token):
+    # outputs: [user_state, last, image, *page_outputs, who_box, scans_state, dash_box, token_store]
+    # The on-screen list is cleared; the saved scans stay in localStorage for the next login.
+    auth.end_session(token)
+    return [None, None, None, *pages("auth"), "", [], dashboard_html(lang, []), ""]
+
+
+def restore(token, history, lang):
+    # Runs when the page loads. outputs: [user_state, *page_outputs, who_box, scans_state, dash_box, token_store]
+    user = auth.resume(token)
+    if user is None:
+        return [None, *[gr.update()] * N_OUT, gr.update(), gr.update(), gr.update(), "" if token else gr.update()]
+    scans = _scans_for(history, user)
+    return [user, *pages("dashboard"), who_html(lang, user), scans, dashboard_html(lang, scans), gr.update()]
 
 
 # ----------- scanning ----------- #
-def analyze(image, lang, thr, previous, user, scans):
-    # outputs: [last, result_img, result_box, *page_outputs, scans_state, dash_box]
+def analyze(image, lang, thr, previous, user, scans, history):
+    # outputs: [last, result_img, result_box, *page_outputs, scans_state, dash_box, history_store]
+    keep = [gr.update()] * 3
     if user is None:
         gr.Warning(X[lang]["need_login"])
-        return [previous, gr.update(), gr.update(), *pages("auth"), gr.update(), gr.update()]
+        return [previous, gr.update(), gr.update(), *pages("auth"), *keep]
     if image is None:
         gr.Warning(T[lang]["no_photo"])
-        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT, gr.update(), gr.update()]
+        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT, *keep]
     ok, reason = check_quality(image)   # FR-004: unusable photos are not classified
     if not ok:
         gr.Warning(X[lang]["q_" + reason])
-        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT, gr.update(), gr.update()]
+        return [previous, gr.update(), gr.update(), *[gr.update()] * N_OUT, *keep]
     probs = classify(image)
-    scans = add_record(scans, probs, CLASS_NAMES, thr)
+    scans = add_record(scans, probs, CLASS_NAMES, thr, image)
+    history = {**(history or {}), str(user["id"]): scans}   # saved to localStorage by BrowserState
     return [(image, probs), image, result_html(lang, thr, probs, CLASS_NAMES),
-            *pages("results"), scans, dashboard_html(lang, scans)]
+            *pages("results"), scans, dashboard_html(lang, scans), history]
 
 
 def apply_settings(lang, thr, last, user, scans):
@@ -190,7 +210,12 @@ V6 = int(gr.__version__.split(".")[0]) >= 6  # Gradio 6 moved theme/css to launc
 with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
     user_state = gr.State(None)   # {"id", "username"} or None; kept per browser session
     last = gr.State(None)         # (image, probabilities) of the latest analysis
-    scans_state = gr.State([])    # scan records for the dashboard (cleared on logout)
+    scans_state = gr.State([])    # the logged-in user's scan records (loaded from history_store)
+    # Saved in the browser's localStorage. The secret encrypts the values; keep it fixed
+    # (set BUKO_SECRET) or saved data becomes unreadable after the server restarts.
+    BROWSER_SECRET = os.environ.get("BUKO_SECRET", "change-this-secret")
+    token_store = gr.BrowserState("", storage_key="buko_session", secret=BROWSER_SECRET)
+    history_store = gr.BrowserState({}, storage_key="buko_history", secret=BROWSER_SECRET)
     header = gr.HTML(header_html("en"), elem_id="header-wrap")
 
     with gr.Column(visible=True, elem_classes=["auth-form"]) as auth_page:
@@ -229,16 +254,20 @@ with gr.Blocks(title="Buko Bantay", **({} if V6 else STYLE)) as demo:
     # same order as PAGES, then the nav bar
     page_outputs = [auth_page, home, results, settings, dash_page, nav_row]
 
-    login_inputs = [username_box, password_box, lang_radio]
-    login_outputs = [user_state, *page_outputs, password_box, who_box]
+    login_inputs = [username_box, password_box, lang_radio, history_store]
+    login_outputs = [user_state, *page_outputs, password_box, who_box, token_store, scans_state, dash_box]
     login_btn.click(do_login, login_inputs, login_outputs)
     password_box.submit(do_login, login_inputs, login_outputs)
     register_btn.click(do_register, login_inputs, login_outputs)
-    logout_btn.click(do_logout, lang_radio,
-                     [user_state, last, image, *page_outputs, who_box, scans_state, dash_box])
+    logout_btn.click(do_logout, [lang_radio, token_store],
+                     [user_state, last, image, *page_outputs, who_box, scans_state, dash_box, token_store])
 
-    analyze_btn.click(analyze, [image, lang_radio, strict_radio, last, user_state, scans_state],
-                      [last, result_img, result_box, *page_outputs, scans_state, dash_box])
+    analyze_btn.click(analyze, [image, lang_radio, strict_radio, last, user_state, scans_state, history_store],
+                      [last, result_img, result_box, *page_outputs, scans_state, dash_box, history_store])
+
+    # On every page load / refresh: read the saved token and sign the user back in.
+    demo.load(restore, [token_store, history_store, lang_radio],
+              [user_state, *page_outputs, who_box, scans_state, dash_box, token_store])
     again_btn.click(lambda: [*pages("home"), None], outputs=[*page_outputs, image])
     nav_home.click(lambda lang, s: [*pages("dashboard"), dashboard_html(lang, s)],
                    [lang_radio, scans_state], [*page_outputs, dash_box])
